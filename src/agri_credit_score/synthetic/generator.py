@@ -176,6 +176,7 @@ def generate(
     seed: int = 42,
     missingness_rate: float = 0.05,
     as_of_date: str = "2026-04-22",
+    spread_months: int = 0,
 ) -> pd.DataFrame:
     """Generate a synthetic borrower dataset.
 
@@ -184,7 +185,11 @@ def generate(
     n : number of borrowers
     seed : RNG seed for reproducibility
     missingness_rate : fraction of numeric values to set NaN (MCAR)
-    as_of_date : scoring reference date (ISO string)
+    as_of_date : scoring reference date (ISO string); used as the end anchor
+    spread_months : if > 0, distribute borrowers across this many monthly
+        buckets ending at as_of_date with linearly increasing weights
+        (more recent months get proportionally more rows). Required for
+        time-based holdout evaluation in train.py.
 
     Returns
     -------
@@ -209,6 +214,20 @@ def generate(
     df = df.drop(columns=["base_default_rate"])
     df = _inject_missingness(df, missingness_rate, rng)
 
+    if spread_months > 0:
+        # Compute monthly first-of-month dates from oldest to newest,
+        # ending at the month containing as_of_date.
+        month_starts = [
+            (as_of - pd.DateOffset(months=i)).replace(day=1)
+            for i in range(spread_months - 1, -1, -1)
+        ]
+        # Linear weights: month 1 weight = 1, month N weight = N.
+        weights = np.arange(1, spread_months + 1, dtype=float)
+        weights /= weights.sum()
+        chosen_idx = rng.choice(spread_months, size=len(df), p=weights)
+        month_arr = np.array(month_starts, dtype="datetime64[ns]")
+        df["as_of_date"] = month_arr[chosen_idx]
+
     return df
 
 
@@ -217,9 +236,10 @@ def generate(
 @click.option("--seed", default=42, help="Random seed.")
 @click.option("--missingness", default=0.05, help="MCAR missingness rate.")
 @click.option("--out", default="data/synthetic/borrowers.parquet", help="Output path.")
-def cli(n: int, seed: int, missingness: float, out: str) -> None:
+@click.option("--spread-months", default=0, help="Distribute borrowers across N monthly cohorts (0 = single as_of_date).")
+def cli(n: int, seed: int, missingness: float, out: str, spread_months: int) -> None:
     """Generate synthetic borrower data and write to parquet."""
-    df = generate(n=n, seed=seed, missingness_rate=missingness)
+    df = generate(n=n, seed=seed, missingness_rate=missingness, spread_months=spread_months)
     out_path = Path(out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(out_path, index=False)

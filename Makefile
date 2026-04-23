@@ -4,7 +4,7 @@ install:
 	pip install -e ".[dev]"
 
 data:
-	python -m agri_credit_score.synthetic.generator --n 10000 --out data/synthetic/borrowers.parquet --seed 42
+	python -m agri_credit_score.synthetic.generator --n 10000 --out data/synthetic/borrowers.parquet --seed 42 --spread-months 24
 
 train:
 	python -m agri_credit_score.models.train --data data/synthetic/borrowers.parquet --out models/

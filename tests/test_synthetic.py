@@ -66,6 +66,23 @@ def test_net_flow_is_consistent() -> None:
     np.testing.assert_allclose(df["mm_net_flow_90d"].to_numpy(), recomputed.to_numpy())
 
 
+def test_spread_months_produces_multiple_dates() -> None:
+    df = generate(n=500, seed=42, spread_months=12)
+    unique_months = df["as_of_date"].dt.to_period("M").nunique()
+    assert unique_months == 12, f"Expected 12 unique months, got {unique_months}"
+    # Linear weighting means the most recent month should have more rows than the oldest.
+    counts = df.groupby(df["as_of_date"].dt.to_period("M")).size().sort_index()
+    assert counts.iloc[-1] > counts.iloc[0], (
+        "Expected most-recent month to have more rows than oldest (linear weighting)"
+    )
+
+
+def test_spread_months_zero_is_unchanged() -> None:
+    df_spread = generate(n=200, seed=7, spread_months=0)
+    df_plain = generate(n=200, seed=7)
+    assert df_spread["as_of_date"].nunique() == 1
+
+
 def test_label_correlates_with_balance_volatility() -> None:
     """Sanity check: distressed/volatile borrowers have higher balance CV and default more."""
     df = generate(n=10_000, seed=42, missingness_rate=0.0)

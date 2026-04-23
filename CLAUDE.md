@@ -82,9 +82,11 @@ agri-credit-score/
 
 - v0 scaffold complete
 - Synthetic generator validated (default rate ~22%, plausible)
+- Synthetic generator supports `spread_months` to distribute borrowers across N monthly cohorts with recency-weighted sampling (required for time-based holdout)
 - XGBoost trained on 5000 synthetic rows: ROC-AUC 0.78, PR-AUC 0.51, Brier 0.14, ECE 0.04
 - LR baseline: ROC-AUC 0.77
-- 22/22 tests pass
+- `train.py` supports `--split-mode time` for chronological retrospective backtest simulation; reports `time_split_metrics`, `random_split_metrics`, and `future_holdout_metrics` in metadata.json
+- 26/26 tests pass
 - API smoke-tested via TestClient
 - Streamlit dashboard: 3 tabs (single borrower, batch, model info)
 
@@ -92,8 +94,7 @@ agri-credit-score/
 
 1. Draft `docs/WORKING_PAPER.md` — 8–12 page technical report for arXiv/SSRN
 2. Create outreach tracker (separate from this repo) — 50 SACCO/MFI contacts to interview
-3. Add time-based holdout to training (train on months 1–18, test on months 19–24) to simulate retrospective backtest
-4. Swahili README translation review (current version is a placeholder)
+3. Swahili README translation review (current version is a placeholder)
 
 ## Context about the founder
 

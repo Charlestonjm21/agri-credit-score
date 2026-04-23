@@ -93,18 +93,37 @@ def _optuna_search(
 
 
 def train_xgboost(
-    df: pd.DataFrame, n_trials: int = 30, seed: int = 42
+    df: pd.DataFrame,
+    n_trials: int = 30,
+    seed: int = 42,
+    df_test: pd.DataFrame | None = None,
 ) -> tuple[CalibratedClassifierCV, dict]:
-    """Train XGBoost with Optuna search, then isotonically calibrate."""
+    """Train XGBoost with Optuna search, then isotonically calibrate.
+
+    Parameters
+    ----------
+    df : training pool. When df_test is None this is the full dataset and an
+        internal random 80/20 split is used. When df_test is provided, df is
+        treated as the training pool only and no internal test split is made.
+    df_test : optional pre-split test set. Pass this when the caller controls
+        the split strategy (e.g. time-based holdout).
+    """
     X = _prep_xgb_features(df)
     y = df[TARGET].to_numpy()
 
-    X_dev, X_test, y_dev, y_test = train_test_split(
-        X, y, test_size=0.2, stratify=y, random_state=seed
-    )
-    X_train, X_cal, y_train, y_cal = train_test_split(
-        X_dev, y_dev, test_size=0.15, stratify=y_dev, random_state=seed
-    )
+    if df_test is None:
+        X_dev, X_test, y_dev, y_test = train_test_split(
+            X, y, test_size=0.2, stratify=y, random_state=seed
+        )
+        X_train, X_cal, y_train, y_cal = train_test_split(
+            X_dev, y_dev, test_size=0.15, stratify=y_dev, random_state=seed
+        )
+    else:
+        X_test = _prep_xgb_features(df_test)
+        y_test = df_test[TARGET].to_numpy()
+        X_train, X_cal, y_train, y_cal = train_test_split(
+            X, y, test_size=0.15, stratify=y, random_state=seed
+        )
 
     click.echo(f"  Search space: {n_trials} trials, 5-fold CV on PR-AUC...")
     best_params = _optuna_search(X_train, y_train, n_trials=n_trials, seed=seed)
@@ -143,14 +162,28 @@ def train_xgboost(
 
 
 def train_logistic_baseline(
-    df: pd.DataFrame, seed: int = 42
+    df: pd.DataFrame,
+    seed: int = 42,
+    df_test: pd.DataFrame | None = None,
 ) -> tuple[Pipeline, dict]:
-    """Train a logistic regression baseline using the preprocessing pipeline."""
+    """Train a logistic regression baseline using the preprocessing pipeline.
+
+    Parameters
+    ----------
+    df : training pool (full dataset when df_test is None, training split otherwise).
+    df_test : optional pre-split test set; mirrors the df_test contract in train_xgboost.
+    """
     X = df[ALL_FEATURES]
     y = df[TARGET].to_numpy()
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, stratify=y, random_state=seed
-    )
+
+    if df_test is None:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, stratify=y, random_state=seed
+        )
+    else:
+        X_train, y_train = X, y
+        X_test = df_test[ALL_FEATURES]
+        y_test = df_test[TARGET].to_numpy()
 
     preprocessor = build_preprocessor()
     model = Pipeline(
@@ -180,7 +213,19 @@ def train_logistic_baseline(
 @click.option("--out", default="models/", help="Output directory for artifacts")
 @click.option("--trials", default=30, help="Optuna trial count")
 @click.option("--seed", default=42)
-def cli(data: str, out: str, trials: int, seed: int) -> None:
+@click.option(
+    "--split-mode",
+    type=click.Choice(["random", "time"]),
+    default="random",
+    show_default=True,
+    help=(
+        "'random': stratified random 80/20 split (default). "
+        "'time': chronological split — requires as_of_date spread in the data "
+        "(use spread_months > 0 in the generator). "
+        "See docs/SPEC.md §6.2 for the full evaluation protocol."
+    ),
+)
+def cli(data: str, out: str, trials: int, seed: int, split_mode: str) -> None:
     """Train scoring models and persist artifacts."""
     out_dir = Path(out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -188,28 +233,139 @@ def cli(data: str, out: str, trials: int, seed: int) -> None:
     click.echo(f"Loading data from {data}...")
     df = pd.read_parquet(data)
     click.echo(f"  {len(df):,} rows, default rate {df[TARGET].mean():.3f}")
+    click.echo(f"  Split mode: {split_mode}")
 
-    click.echo("\nTraining logistic regression baseline...")
-    lr_model, lr_info = train_logistic_baseline(df, seed=seed)
-    click.echo(f"  LR test metrics: {lr_info['test_metrics']}")
-    with open(out_dir / "lr.pkl", "wb") as f:
-        pickle.dump(lr_model, f)
+    if split_mode == "random":
+        click.echo("\nTraining logistic regression baseline...")
+        lr_model, lr_info = train_logistic_baseline(df, seed=seed)
+        click.echo(f"  LR test metrics: {lr_info['test_metrics']}")
+        with open(out_dir / "lr.pkl", "wb") as f:
+            pickle.dump(lr_model, f)
 
-    click.echo("\nTraining XGBoost...")
-    xgb_model, xgb_info = train_xgboost(df, n_trials=trials, seed=seed)
-    click.echo(f"  XGB test metrics: {xgb_info['test_metrics']}")
-    with open(out_dir / "xgb.pkl", "wb") as f:
-        pickle.dump(xgb_model, f)
+        click.echo("\nTraining XGBoost...")
+        xgb_model, xgb_info = train_xgboost(df, n_trials=trials, seed=seed)
+        click.echo(f"  XGB test metrics: {xgb_info['test_metrics']}")
+        with open(out_dir / "xgb.pkl", "wb") as f:
+            pickle.dump(xgb_model, f)
 
-    metadata = {
-        "model_version": MODEL_VERSION,
-        "trained_at": datetime.now(timezone.utc).isoformat(),
-        "n_train_rows": int(len(df)),
-        "seed": seed,
-        "xgboost": xgb_info,
-        "logistic_regression": lr_info,
-        "features": ALL_FEATURES,
-    }
+        metadata = {
+            "model_version": MODEL_VERSION,
+            "trained_at": datetime.now(timezone.utc).isoformat(),
+            "split_mode": "random",
+            "n_train_rows": int(len(df)),
+            "seed": seed,
+            "xgboost": xgb_info,
+            "logistic_regression": lr_info,
+            "features": ALL_FEATURES,
+        }
+
+    else:  # split_mode == "time"
+        if df["as_of_date"].nunique() == 1:
+            click.echo(
+                "WARNING: as_of_date has only one unique value. "
+                "Time split is meaningless — regenerate data with spread_months > 0."
+            )
+
+        # Time-split evaluation protocol (see docs/SPEC.md §6.2):
+        # Sort by as_of_date. The first 80% is the "pool" used for all model
+        # training and within-pool comparison; the last 20% is a true future
+        # holdout evaluated post-hoc on the primary (time-split) model.
+        #
+        # Within the pool two evaluations isolate the effect of split strategy
+        # while holding data volume and distribution constant:
+        #   time_split_metrics  — train on pool's first 80% (by date),
+        #                         evaluate on pool's last 20% (by date)
+        #   random_split_metrics — random 80/20 of pool, evaluate on 20%
+        # Only the split strategy differs between the two; archetype mix and
+        # sample size are identical.
+        df_sorted = df.sort_values("as_of_date").reset_index(drop=True)
+        n_total = len(df_sorted)
+        n_pool = int(n_total * 0.8)
+
+        df_pool = df_sorted.iloc[:n_pool].reset_index(drop=True)
+        df_future = df_sorted.iloc[n_pool:].reset_index(drop=True)
+
+        n_pool_train = int(len(df_pool) * 0.8)
+        df_pool_time_train = df_pool.iloc[:n_pool_train].reset_index(drop=True)
+        df_pool_time_test = df_pool.iloc[n_pool_train:].reset_index(drop=True)
+
+        df_pool_rand_train, df_pool_rand_test = train_test_split(
+            df_pool,
+            test_size=0.2,
+            stratify=df_pool[TARGET],
+            random_state=seed,
+        )
+
+        # LR — time split
+        click.echo("\nTraining logistic regression baseline (time split)...")
+        lr_model, lr_time_info = train_logistic_baseline(
+            df_pool_time_train, seed=seed, df_test=df_pool_time_test
+        )
+        click.echo(f"  LR time-split metrics: {lr_time_info['test_metrics']}")
+        with open(out_dir / "lr.pkl", "wb") as f:
+            pickle.dump(lr_model, f)
+
+        # LR — random split (same pool, different selection)
+        click.echo("\nTraining logistic regression baseline (random split)...")
+        _, lr_rand_info = train_logistic_baseline(
+            df_pool_rand_train, seed=seed, df_test=df_pool_rand_test
+        )
+        click.echo(f"  LR random-split metrics: {lr_rand_info['test_metrics']}")
+
+        lr_info = {
+            "time_split_metrics": lr_time_info["test_metrics"],
+            "random_split_metrics": lr_rand_info["test_metrics"],
+        }
+
+        # XGBoost — time split (primary model, artifact saved)
+        click.echo("\nTraining XGBoost (time split)...")
+        xgb_model, xgb_time_info = train_xgboost(
+            df_pool_time_train, n_trials=trials, seed=seed, df_test=df_pool_time_test
+        )
+        click.echo(f"  XGB time-split metrics: {xgb_time_info['test_metrics']}")
+        with open(out_dir / "xgb.pkl", "wb") as f:
+            pickle.dump(xgb_model, f)
+
+        # XGBoost — random split (same pool, for comparison only)
+        click.echo("\nTraining XGBoost (random split)...")
+        _, xgb_rand_info = train_xgboost(
+            df_pool_rand_train, n_trials=trials, seed=seed, df_test=df_pool_rand_test
+        )
+        click.echo(f"  XGB random-split metrics: {xgb_rand_info['test_metrics']}")
+
+        # Evaluate primary model on true future holdout
+        X_future = _prep_xgb_features(df_future)
+        y_future = df_future[TARGET].to_numpy()
+        future_probs = xgb_model.predict_proba(X_future)[:, 1]
+        future_metrics = {
+            "roc_auc": float(roc_auc_score(y_future, future_probs)),
+            "pr_auc": float(average_precision_score(y_future, future_probs)),
+            "brier": float(brier_score_loss(y_future, future_probs)),
+            "n": int(len(y_future)),
+        }
+        click.echo(f"  XGB future-holdout metrics: {future_metrics}")
+
+        xgb_info = {
+            "best_params": xgb_time_info["best_params"],
+            "time_split_metrics": xgb_time_info["test_metrics"],
+            "random_split_metrics": xgb_rand_info["test_metrics"],
+            "future_holdout_metrics": future_metrics,
+        }
+
+        metadata = {
+            "model_version": MODEL_VERSION,
+            "trained_at": datetime.now(timezone.utc).isoformat(),
+            "split_mode": "time",
+            "n_total_rows": n_total,
+            "n_pool_rows": int(len(df_pool)),
+            "n_pool_train_rows": int(len(df_pool_time_train)),
+            "n_future_holdout_rows": int(len(df_future)),
+            "seed": seed,
+            "xgboost": xgb_info,
+            "logistic_regression": lr_info,
+            "features": ALL_FEATURES,
+        }
+
     with open(out_dir / "metadata.json", "w") as f:
         json.dump(metadata, f, indent=2)
 

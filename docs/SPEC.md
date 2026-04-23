@@ -161,7 +161,13 @@ Every prediction returned by the API must include:
 ### 6.2 Validation strategy
 
 - **5-fold stratified cross-validation** on the full synthetic dataset
-- **Time-based holdout:** Generate 24 months of synthetic data; train on months 1–18, test on months 19–24. This simulates the retrospective backtest that will be the real validation step with a lender.
+- **Time-based holdout:** Use `spread_months=24` in the synthetic generator to distribute borrowers across 24 monthly cohorts (linearly recency-weighted). The CLI flag `--split-mode time` then applies the following protocol:
+  1. Sort the dataset by `as_of_date`. The first 80% of rows (by date) form the **pool**; the last 20% are the **true future holdout** (unseen during all training).
+  2. Within the pool, two evaluations are run side-by-side to isolate the effect of split strategy while holding data volume and archetype distribution constant:
+     - **`time_split_metrics`**: train on the pool's first 80% (earliest cohorts), evaluate on the pool's last 20% (most recent cohorts).
+     - **`random_split_metrics`**: random 80/20 split of the same pool; train on random 80%, evaluate on random 20%.
+  3. The primary model artifact saved is the time-split-trained model. It is also evaluated on the true future holdout and reported as **`future_holdout_metrics`**.
+  - The gap between `random_split_metrics` and `time_split_metrics` measures within-pool temporal drift. The gap between `time_split_metrics` and `future_holdout_metrics` measures out-of-pool degradation.
 - **Fairness audit:** AUC and FPR parity across gender and across the three main regional groupings (Northern, Coastal, Southern Highlands). Report disparities even if small.
 
 ### 6.3 Target performance on synthetic data

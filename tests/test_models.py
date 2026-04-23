@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import numpy as np
+from sklearn.model_selection import train_test_split
 
 from agri_credit_score.config import ALL_FEATURES, CATEGORICAL_FEATURES, TARGET
 from agri_credit_score.models.evaluate import (
@@ -82,6 +83,50 @@ def test_ks_statistic_bounds() -> None:
     ks = _ks_statistic(y, probs)
     # Perfect separation means KS = 1
     assert ks > 0.95
+
+
+def test_time_split_trains_and_predicts() -> None:
+    """train_xgboost and train_logistic_baseline accept a pre-split df_test."""
+    from agri_credit_score.synthetic.generator import generate
+
+    df = generate(n=1000, seed=42, spread_months=24)
+    df_sorted = df.sort_values("as_of_date").reset_index(drop=True)
+    n_pool = int(len(df_sorted) * 0.8)
+    df_pool = df_sorted.iloc[:n_pool].reset_index(drop=True)
+    n_train = int(len(df_pool) * 0.8)
+    df_train = df_pool.iloc[:n_train].reset_index(drop=True)
+    df_test = df_pool.iloc[n_train:].reset_index(drop=True)
+
+    xgb_model, xgb_info = train_xgboost(df_train, n_trials=3, seed=42, df_test=df_test)
+    assert xgb_info["test_metrics"]["roc_auc"] > 0.5
+    assert 0 <= xgb_info["test_metrics"]["brier"] <= 1
+
+    lr_model, lr_info = train_logistic_baseline(df_train, seed=42, df_test=df_test)
+    assert lr_info["test_metrics"]["roc_auc"] > 0.5
+
+
+def test_time_split_both_metric_sets_comparable() -> None:
+    """Both time-split and random-split metrics are computable from the same pool."""
+    from agri_credit_score.synthetic.generator import generate
+
+    df = generate(n=800, seed=42, spread_months=24)
+    df_pool = df.sort_values("as_of_date").reset_index(drop=True)
+    n_train = int(len(df_pool) * 0.8)
+    df_time_train = df_pool.iloc[:n_train].reset_index(drop=True)
+    df_time_test = df_pool.iloc[n_train:].reset_index(drop=True)
+
+    df_rand_train, df_rand_test = train_test_split(
+        df_pool, test_size=0.2, stratify=df_pool[TARGET], random_state=42
+    )
+
+    _, time_info = train_xgboost(df_time_train, n_trials=2, seed=42, df_test=df_time_test)
+    _, rand_info = train_xgboost(df_rand_train, n_trials=2, seed=42, df_test=df_rand_test)
+
+    for info in (time_info, rand_info):
+        assert "test_metrics" in info
+        m = info["test_metrics"]
+        assert "roc_auc" in m and "pr_auc" in m and "brier" in m
+        assert 0 <= m["roc_auc"] <= 1
 
 
 def test_fairness_audit_returns_per_group() -> None:
